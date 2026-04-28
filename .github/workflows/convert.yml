@@ -1,4 +1,4 @@
-name: Build Wanxiang Plugin with Librime
+name: Convert PyTorch to NCNN via PNNX
 
 on:
   push:
@@ -6,100 +6,37 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
+  convert:
     runs-on: ubuntu-22.04
 
     steps:
-      - name: 1. 检出插件源码 (包含 ONNX 模型)
+      - name: 1. 检出代码 (获取你的 .pt 模型)
         uses: actions/checkout@v4
-        with:
-          path: librime-wanxiang # 先把自己的代码检出到这个子目录
 
-      - name: 2. 安装编译依赖 (修复版)
+      - name: 2. 通过 Pip 极速安装 PNNX 神器
         run: |
-          sudo apt-get update
-          # 💡 核心改动：排除掉 libgoogle-glog-dev，改用其他更兼容的库
-          # 同时加入 libbrpc-dev 等可能需要的辅助库
-          sudo apt-get install -y cmake build-essential \
-                                 libboost-all-dev \
-                                 libyaml-cpp-dev \
-                                 libleveldb-dev \
-                                 libmarisa-dev \
-                                 libopenblas-dev \
-                                 libprotobuf-dev protobuf-compiler \
-                                 libgtest-dev libgmock-dev
+          python -m pip install --upgrade pip
+          pip install pnnx
+
+      - name: 3. 执行纯血降维转换
+        run: |
+          cd data
           
-          # 💡 手动处理 glog，如果 librime 真的非它不可，
-          # 我们在 ubuntu 下通常可以用这个包替代，或者让 librime 编译时跳过它
-          sudo apt-get install -y libghc-glog-dev || echo "glog not found, continuing..."
-
-      - name: 3. 下载并解压 NCNN 工具包
-        run: |
-          wget https://github.com/Tencent/ncnn/releases/download/20240410/ncnn-20240410-ubuntu-2204.zip
-          # 💡 直接解压，不指定目录，它会生成一个类似 ncnn-20240410-ubuntu-2204 的文件夹
-          unzip ncnn-20240410-ubuntu-2204.zip
-
-      - name: 4. 执行模型转换 (精准定位 data 目录)
-        run: |
-          # 1. 自动搜索转换工具 (这个依然动态搜，最稳)
-          ONNX2NCNN_PATH=$(find . -name onnx2ncnn -type f -executable | head -n 1)
-          echo "🎯 找到转换工具: $ONNX2NCNN_PATH"
+          # 🚀 核心指令：直吃 PyTorch 模型，自动吐出 NCNN 格式！
+          # 💡 注意这里的细节：因为咱们代码里输入是 torch.long，
+          # 所以必须在 shape 后面加上 i64 (代表 64位整数)，这样引擎就能完美识别查字典操作！
+          pnnx rime_morandi_lm.pt "inputshape=[1,3]i64"
           
-          # 2. 定位 data 目录下的 ONNX 模型
-          # 假设文件名就是 rime_morandi_lm.onnx
-          INPUT_ONNX="librime-wanxiang/data/rime_morandi_lm.onnx"
-          PARAM_OUT="librime-wanxiang/data/rime_morandi_lm.ncnn.param"
-          MODEL_OUT="librime-wanxiang/data/rime_morandi_lm.ncnn.model"
-
-          if [ ! -f "$INPUT_ONNX" ]; then
-            echo "❌ 错误: 在 data 目录下找不到 $INPUT_ONNX"
-            # 这里的 ls 是为了万一路径不对，帮你排查真正的目录结构
-            ls -R
-            exit 1
-          fi
-
-          # 3. 开始转换
-          chmod +x "$ONNX2NCNN_PATH"
-          "$ONNX2NCNN_PATH" "$INPUT_ONNX" "$PARAM_OUT" "$MODEL_OUT"
+          # PNNX 默认生成 .bin 权重文件，为了配合咱们 C++ 代码，重命名为 .model
+          mv rime_morandi_lm.ncnn.bin rime_morandi_lm.ncnn.model
           
-          echo "=== ✅ 模型转换成功！ ==="
-          head -n 15 "$PARAM_OUT"
+          echo "=== 🎯 PNNX 转换成功！预览纯净 param 头部 ==="
+          head -n 15 rime_morandi_lm.ncnn.param
 
-      - name: 5. 获取 Librime 主仓库 (极速版)
-        run: |
-          git clone --recursive --depth 1 https://github.com/rime/librime.git
-
-      - name: 6. 注入插件及模型文件
-        run: |
-          # 创建插件目录
-          mkdir -p librime/plugins/wanxiang
-          
-          # 拷贝源码到插件目录
-          cp -r librime-wanxiang/* librime/plugins/wanxiang/
-          
-          # 💡 额外保险：把转换好的模型文件也拷贝到插件目录下，方便一起打包
-          cp librime-wanxiang/data/*.ncnn.* librime/plugins/wanxiang/
-
-      - name: 7. 编译带插件的 Librime
-        run: |
-          # 自动定位 NCNN_ROOT
-          LIB_PATH=$(find ${{ github.workspace }} -name "libncnn.a" | head -n 1)
-          REAL_NCNN_ROOT=$(dirname $(dirname "$LIB_PATH"))
-          echo "📍 NCNN_ROOT: $REAL_NCNN_ROOT"
-
-          cd librime
-          cmake . -Bbuild \
-                -DCMAKE_BUILD_TYPE=Release \
-                -DBUILD_SHARED_LIBS=ON \
-                -DBUILD_TEST=OFF \
-                -DNCNN_ROOT="$REAL_NCNN_ROOT"
-          cmake --build build -j$(nproc)
-
-      - name: 8. 上传最终产物 (模型 + 满血版 librime.so)
+      - name: 4. 上传最终产物
         uses: actions/upload-artifact@v4
         with:
-          name: rime-wanxiang-dist
+          name: pure-ncnn-models
           path: |
-            librime/plugins/wanxiang/rime_morandi_lm.ncnn.param
-            librime/plugins/wanxiang/rime_morandi_lm.ncnn.model
-            librime/build/lib/librime.so*
+            data/rime_morandi_lm.ncnn.param
+            data/rime_morandi_lm.ncnn.model
